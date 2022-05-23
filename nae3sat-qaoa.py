@@ -1,27 +1,23 @@
 #################################################################
 #                                                               #
-#   SOLVING NAE3SAT USING QAOA ALGORITHM                        #
+#   SOLVING #NAE3SAT USING QAOA ALGORITHM                       #
 #   ==========================================                  #
 #   ( nae3sat-qaoa.py )                                         #
 #   First instance: 20220517                                    #
 #   Written by Julien Drapeau                                   #
 #                                                               #
-#   This script sample a random instance of a bicubic graph     #
+#   This script samples a random instance of a bicubic graph    #
 #   representing a #NAE3SAT problem. Then, it finds an          #
 #   approximate solution using the QAOA algorithm and           #
 #   benchmark it with an exact solution given by a tensor       #
 #   network contraction (tensorcsp.py).                         #
 #                                                               #
 #   DEPENDENCIES: tensorcsp.py, scipy, qiskit, matplotlib,      #
-#                 bipartite-graph-sampling                      #
+#                 qecstruct                                     #
 #                                                               #
 #################################################################
 
 
-from readline import get_history_item
-import sys  
-import subprocess           
-sys.dont_write_bytecode = True
 from timeit import default_timer
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
@@ -29,9 +25,77 @@ from qiskit import QuantumCircuit
 from qiskit import Aer
 from qiskit.visualization import plot_histogram
 from tensorcsp import * 
+import qecstruct as qs
 
 
-def loss(x, G, A):
+class graph:
+
+    """
+    This class instantiates a random bicubic graph representating a NAE3SAT problem using qecstruct.
+    """
+
+    def __init__(self, numvar, numcau, vardeg, caudeg, seed):
+
+        """
+        Args:
+        numvar: number of variables
+        numcau: number of causes
+        vardeg: variables degree
+        caudeg: causes degree
+        """
+
+        #samples a random bicubic graph
+        code = qs.random_regular_code(numvar, numcau, vardeg, caudeg, qs.Rng(seed))
+
+        #CNF formula
+        cf = []
+        edges = []
+        for row in code.par_mat().rows():
+            temp_cf = []
+            for value in row:
+                temp_cf.append(value)
+            cf.append(temp_cf)
+            edges.append([temp_cf[0],temp_cf[1]])
+            edges.append([temp_cf[1],temp_cf[2]])
+            edges.append([temp_cf[2],temp_cf[0]])
+
+        self.cf = array(cf)+1
+        self.cf_nae = vstack((self.cf, invert(self.cf)+1))
+        self.edges = array(edges)
+        self.numnodes = numvar
+
+    def cf(self):
+        """
+        CNF formula of 3SAT
+        """
+        return self.cf
+
+    def cf_nae(self):
+        """
+        CNF formula of NAE3SAT
+        """
+        return self.cf_nae
+
+    def numnodes(self):
+        return self.numnodes
+
+    def edges(self):
+        return self.edges
+
+    def ising_view(self):
+        """
+        Ising formulation graph
+        """
+        return Graph(n=self.numnodes, edges=self.edges)
+
+    def cf_view(self):
+        """
+        CNF formulation graph
+        """
+        return cnf_graph(self.cf)
+
+
+def compute_loss(x, G, A):
     
     """
     Given a bitstring as a solution, this function return 
@@ -40,7 +104,7 @@ def loss(x, G, A):
     Args:
         x: str
            solution bitstring
-        G: igraph graph
+        G: graph object
         A: parameter of the ising model
         
     Returns:
@@ -49,7 +113,7 @@ def loss(x, G, A):
     """
     
     loss = 0
-    for i, j in G.get_edgelist():
+    for i, j in G.edges:
         loss += A*(2*int(x[i])-1)*(2*int(x[j])-1)
     
     return loss
@@ -57,12 +121,12 @@ def loss(x, G, A):
 def compute_expectation(counts, G, A):
     
     """
-    Computes expectation value based on measurement results
+    Computes expectation value based on measurement results.
     
     Args:
         counts: dict
                 key as bitstring, val as count
-        G: igraph graph
+        G: graph object
         A: parameter of the ising model
         
     Returns:
@@ -73,26 +137,26 @@ def compute_expectation(counts, G, A):
     avg = 0
     sum_count = 0
     for bitstring, count in counts.items():
-        obj = loss(bitstring, G, A)
+        obj = compute_loss(bitstring, G, A)
         avg += obj*count
         sum_count += count
     
     return avg/sum_count
     
-def create_qaoa_circ(G, theta):
+def create_qaoa_circ(G, theta, A):
     
     """
-    Creates a parametrized qaoa circuit
+    Creates a parametrized qaoa circuit.
     
     Args:
-        G: igraph graph
+        G: graph object
         theta: list of unitary parameters
     
     Returns:
         qc: qiskit circuit
     """
     
-    nqubits = len(G.vs.indices)
+    nqubits = G.numnodes
     p = len(theta)//2 #number of alternating unitaries
     qc = QuantumCircuit(nqubits)
     
@@ -108,7 +172,7 @@ def create_qaoa_circ(G, theta):
     for irep in range(0,p):
         
         #problem unitary
-        for pair in list(G.get_edgelist()):
+        for pair in G.edges:
             qc.rzz(A*gamma[irep], pair[0], pair[1])
             qc.barrier()
         
@@ -125,10 +189,10 @@ def create_qaoa_circ(G, theta):
 def get_expectation(G, A, shots=512):
     
     """
-    Runs parametrized circuit
+    Runs parametrized circuit.
     
     Args:
-        G: igraph graph
+        G: graph object
         A: parameter of the ising model
     """
     
@@ -136,80 +200,80 @@ def get_expectation(G, A, shots=512):
     backend.shots = shots
     
     def execute_circ(theta):
-        qc = create_qaoa_circ(G, theta)
+        qc = create_qaoa_circ(G, theta, A)
         counts = backend.run(qc, seed_simulator=10, nshots=512).result().get_counts()
         
         return compute_expectation(counts, G, A)
     
     return execute_circ
 
+def run_qaoa_circ(G, p, A, shots=512, optimizer='COBYLA', simulator='aer_simulator', seed_simulator=10):
+
+    """
+    Minimize the expectation value by finding the best parameters.
+    Analyse the results with a histogram.
+
+    Args:
+        G: graph object
+        p: int
+           number of alternating unitairies
+        A: parameter of the ising model
+        
+    Returns:
+        obj: dict
+             counts
+    """
+    
+    expectation = get_expectation(G, A)
+    res = minimize(expectation, random.randn(2*p)/2+1, method=optimizer)
+
+    backend = Aer.get_backend(simulator)
+    backend.shots = shots
+
+    qc_res = create_qaoa_circ(G, res.x, A)
+    counts = backend.run(qc_res, seed_simulator=seed_simulator).result().get_counts()
+
+    return counts
+
 
 #BICUBIC GRAPH SAMPLING TO REPRESENT RANDOM INSTANCES OF #NAE3SAT
 
 
-numvar = 5   #number of variables
-numcst = 5   #number of causes
-vardeg = 3   #variables degree
-cstdeg = 3   #causes degree
-seed = 66666
+numvar = 4    #number of variables
+numcau = 4    #number of causes
+vardeg = 3    #variables degree
+caudeg = 3    #causes degree
+seed = 666
 
-#use bipartite-graph-sampling to sample a graph 
-#(to run in \bipartite-graph-sampling-master\cli directory)
-subprocess.run(['cargo', 'run', '--',
-                '-n', str(numvar),
-                '-m', str(numcst),
-                '-c', str(cstdeg),
-                '-v', str(vardeg),
-                '-r', str(seed),
-                '-o', 'tmp.txt'])
+#samples a random bicubic graph
+G = graph(numvar, numcau, vardeg, caudeg, seed)
 
-with open('tmp.txt') as file:
-    graph = eval(file.read())
-
-#CNF formula of 3SAT
-cf = array(graph['graph']['constraint_neighbors'])+1
-#CNF formula of NAE3SAT
-cf_nae = vstack((cf, invert(cf)+1))
-
-print('The NAE3SAT formula is: \n',cf_nae)
+print('The NAE3SAT formula is: \n', G.cf_nae)
 print()
 
-edges = []
-for i in cf:
-    edges.append([i[0],i[1]])
-    edges.append([i[1],i[2]])
-    edges.append([i[2],i[0]])
-
-#ising formulation graph
-G_ising = Graph(n=graph['number_of_variables'], edges=array(edges)-1)
-#CNF formulation graph
-G_cnf = cnf_graph(cf)
+#fig, ax = plt.subplots()
+#plt.title('Ising formulation graph')
+#plot(G.ising_view(), target=ax, vertex_label=array(G.ising_view().vs.indices))
 
 #fig, ax = plt.subplots()
-#plot(G_ising, target=ax, vertex_label=array(G_ising.vs.indices))
-
-#fig, ax = plt.subplots()
-#plot(G_cnf, target=ax, vertex_label=array(G_cnf.vs.indices))
+#plt.title('CNF formulation graph')
+#plot(G.cf_view(), target=ax, vertex_label=array(G.cf_view().vs.indices))
+#plt.show()
 
 
 #SOLVING #NAE3SAT WITH QAOA
 
 
-p = 20    #number of turns QAOA
+p = 25   #number of turns QAOA
 A = 1    #Ising model parameter
-shots = 512
+shots = 1024
 
-expectation = get_expectation(G_ising, A)
-res = minimize(expectation, ones(2*p), method='COBYLA')
-
-backend = Aer.get_backend('aer_simulator')
-backend.shots = shots
-
-qc_res = create_qaoa_circ(G_ising, res.x)
-counts = backend.run(qc_res, seed_simulator=10).result().get_counts()
+counts = run_qaoa_circ(G, p, A, shots = shots)
 counts_values = array(list(counts.values()),dtype=int)
 
-plot_histogram(counts, title='#NAE3SAT QAOA of a random bicubic graph with p = '+str(p))
+plot_histogram(counts, title='#NAE3SAT QAOA of a random bicubic graph\
+with p = '+str(p))
+plt.show()
 
 k = 0
 median_counts = median(counts_values)
@@ -217,15 +281,16 @@ for i in counts_values:
     if i > median_counts/2:
         k += 1
 
-print('Solved with QAOA with very roughly', k, 'solutions. See the histogram for a more detail view.')
+print('Solved with QAOA with very roughly', k, 'solutions.\
+See the histogram for a more detailled view.')
 print()
 
 
 #BENCHMARKING WITH TENSORCSP
 
 
-__ = cnf_write(cf_nae,"tmp.cnf")   
-tg = cnf_tngraph(cf_nae,dtype=int)  
+__ = cnf_write(G.cf_nae,"tmp.cnf")   
+tg = cnf_tngraph(G.cf_nae,dtype=int)  
 
 #solve using a greedy contraction algorithm:
 start = default_timer()
@@ -259,5 +324,3 @@ print('Solved with Girvan-Newman in ',end-start,' seconds')
 print('  #Solutions:',sol)
 print('  Max degree:',md.max())
 print()
-
-plt.show()
