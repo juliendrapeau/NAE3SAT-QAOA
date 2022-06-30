@@ -22,6 +22,7 @@
 #################################################################
 
 
+from operator import truth
 import numpy as np
 from scipy.optimize import minimize
 from scipy.signal import argrelextrema
@@ -592,8 +593,8 @@ def solve_sharp_3sat(cf, numvar):
         numvar: number of variables
     
     Returns:
-        sol_prob: list
-                  probability distribution of the solutions
+        sol_pdf: list
+                 probability density function of the solutions
         sol_int: list
                  solutions under the integer form
     """
@@ -602,7 +603,7 @@ def solve_sharp_3sat(cf, numvar):
     solver.append_formula(cf.tolist())
 
     sol = []
-    sol_prob = np.zeros(2**numvar)
+    sol_pdf = np.zeros(2**numvar)
 
     for m in solver.enum_models():
         sol.append(m)
@@ -614,15 +615,15 @@ def solve_sharp_3sat(cf, numvar):
     #for an unsatiable problem
     if len(sol_bool) == 0:
         sol_int = []
-        sol_prob = np.zeros(2**numvar)
+        sol_pdf = np.zeros(2**numvar)
 
     #for a satiable problem
     else:
         #pack the bits from the boolean form to the interger form
         sol_int = sol_bool.dot(2**np.arange(np.shape(sol_bool)[1])[::-1])
-        sol_prob[sol_int] = 1/len(sol_int)
+        sol_pdf[sol_int] = 1/len(sol_int)
 
-    return sol_prob, sol_int
+    return sol_pdf, sol_int
 
 def counting(G, counts):
 
@@ -637,7 +638,7 @@ def counting(G, counts):
     Returns:
         num_sol: approximative number of solutions
     """
-
+    
     numqubit = G.numnodes
     bitstrings = list(counts.keys())
     num_leaf_subt = np.zeros(numqubit)
@@ -647,6 +648,12 @@ def counting(G, counts):
 
     for iter, bitstring in enumerate(bitstrings):
         truth_arr[iter] = test_3sat_state(bitstring, G.cf_nae)
+
+    #test if all the state are non-solutions
+    if np.any(truth_arr) == False:
+        num_sol = None
+        
+        return num_sol
 
     for i in range(numqubit):
         count_one = 0
@@ -671,7 +678,6 @@ def counting(G, counts):
         else:
             num_leaf_subt[i] += count_zero
             choice_subt += "0"
-
     num_sol = count_sol/num_leaf_subt[0]
     for i in range(numqubit-1):
         num_sol *= num_leaf_subt[i]/num_leaf_subt[i+1]
@@ -705,7 +711,7 @@ def find_prob_sol(G, counts):
 
     return prob_sol
 
-def find_tvi(exact_prob, approx_prob):
+def find_tvd(exact_prob, approx_prob):
 
     """
     Calculate the total variation distance between the approximative probability distribution of the solutions found by the QAOA algorithm and the exact probability distribution of the solutions. This is equivalent to the distance between the probability distribution of the solutions and the uniform probability distribution.
